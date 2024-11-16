@@ -3,15 +3,19 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <link rel="stylesheet" href="src/style.css" /> 
-    <title>Game Interface</title>
   </head>
   <body>
     <div id="app">
-      <!-- Main game content area -->
-      <div id="statusPanel"> 
+      <div id="controlPanel">
+        <button id="sensor" title="sensor">ℹ️</button>
+        <button id="north" title="north">⬆️</button>
+        <button id="south" title="south">⬇️</button>
+        <button id="west" title="west">⬅️</button>
+        <button id="east" title="east">➡️</button>t
+        <button id="reset" title="reset">🔁</button>
       </div>
-      <div id="map" style="width: 100%; height: 80vh;"></div>
+      <div id="statusPanel"></div>
+      <div id="map"></div>
     </div>
     <script type="module" src="/src/main.ts"></script>
   </body>

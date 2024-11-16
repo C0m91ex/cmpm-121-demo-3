@@ -16,9 +16,136 @@ const SPAWN_PROB = 0.1;
 const cacheLocationFlyweights = new Map<string, leaflet.LatLngBounds>();
 
 // Initial player stats
-const score = 0;
+let score = 0;
 let coins = 0;
 let uniqueCoinId = 0; // Counter to uniquely identify each coin
+let playerPosition = { x: 0, y: 0 };
+
+// Memento Pattern Classes
+class Memento {
+  private state: string;
+
+  constructor(state: string) {
+    this.state = state;
+  }
+
+  public getState(): string {
+    return this.state;
+  }
+}
+
+class Caretaker {
+  private mementos: Memento[] = [];
+
+  public addMemento(memento: Memento): void {
+    this.mementos.push(memento);
+  }
+
+  public getMemento(index: number): Memento {
+    return this.mementos[index];
+  }
+
+  public getMementosList(): Memento[] {
+    return this.mementos;
+  }
+}
+
+class Game {
+  private visibleCaches: Set<string>;
+  private history: Caretaker;
+
+  constructor() {
+    this.visibleCaches = new Set();
+    this.history = new Caretaker();
+    this.updateVisibleCaches();
+    this.saveState();
+  }
+
+  // Update visible caches based on the player's position
+  private updateVisibleCaches(): void {
+    this.visibleCaches.clear();
+    for (const cache of cacheLocationFlyweights.keys()) {
+      const [row, col] = cache.split(",");
+      const colNum = parseInt(col, 10);
+      if (
+        Math.abs(playerPosition.x - parseInt(row, 10)) <= 1 &&
+        Math.abs(playerPosition.y - colNum) <= 1
+      ) {
+        this.visibleCaches.add(cache);
+      }
+    }
+  }
+
+  // Save the current state of the game (player position and visible caches)
+  private saveState(): void {
+    const state =
+      `Position: (${playerPosition.x}, ${playerPosition.y}) | Caches: ${
+        Array.from(this.visibleCaches).join(", ")
+      }`;
+    const memento = new Memento(state);
+    this.history.addMemento(memento);
+  }
+
+  // Move the player in a given direction (left, right, up, down)
+  public movePlayer(direction: string): void {
+    switch (direction) {
+      case "left":
+        playerPosition.x--;
+        break;
+      case "right":
+        playerPosition.x++;
+        break;
+      case "up":
+        playerPosition.y--;
+        break;
+      case "down":
+        playerPosition.y++;
+        break;
+    }
+
+    this.updateVisibleCaches();
+    this.saveState();
+    this.updateStatusPanel();
+    incrementScore(); // Update score when player moves
+  }
+
+  // Undo the last move
+  public undoMove(): void {
+    const lastMemento = this.history.getMemento(
+      this.history.getMementosList().length - 1,
+    );
+    const state = lastMemento.getState();
+    const positionMatch = state.match(/Position: \((\d+), (\d+)\)/);
+    if (positionMatch) {
+      playerPosition.x = parseInt(positionMatch[1], 10);
+      playerPosition.y = parseInt(positionMatch[2], 10);
+    }
+    this.updateVisibleCaches();
+    this.updateStatusPanel();
+  }
+
+  // Reset the player position and visible caches
+  public resetGame(): void {
+    playerPosition = { x: 0, y: 0 };
+    this.visibleCaches.clear();
+    this.saveState();
+    this.updateStatusPanel();
+  }
+
+  // Update the status panel on the webpage
+  private updateStatusPanel(): void {
+    const statusPanel = document.getElementById("statusPanel");
+    if (statusPanel) {
+      statusPanel.innerHTML =
+        `Player Position: (${playerPosition.x}, ${playerPosition.y})<br />Visible Caches: ${
+          Array.from(this.visibleCaches).join(", ")
+        }`;
+    }
+  }
+}
+
+// Initialize the game
+const game = new Game();
 
 // Map setup with Null Island as center
 const mapElement = document.getElementById("map");
@@ -81,11 +208,10 @@ function createCache(x: number, y: number) {
   // Configure popup for cache interaction
   cacheRectangle.bindPopup(() => {
     const popupContent = document.createElement("div");
-    popupContent.innerHTML = `
+    popupContent.innerHTML = ` 
       <div>Cache at (${x},${y}) contains coins:</div>
-      <ul id="coinList">${
-      cacheCoins.map((id) => `<li>${id}</li>`).join("")
-    }</ul>
+      <ul id="coinList">${cacheCoins.map((id) => `<li>${id}</li>`).join("")}
+      </ul>
       <button id="collectBtn">Collect</button>
       <button id="depositBtn">Deposit</button>
     `;
@@ -130,4 +256,39 @@ for (let x = -LOCAL_RADIUS; x < LOCAL_RADIUS; x++) {
       createCache(x, y);
     }
   }
+}
+
+// Attach the movePlayer function to the global scope
+Object.assign(window, {
+  movePlayer: game.movePlayer.bind(game),
+  undoMove: game.undoMove.bind(game),
+  resetGame: game.resetGame.bind(game),
+});
+
+// Button event listeners for directional movement
+document.getElementById("north")!.addEventListener(
+  "click",
+  () => game.movePlayer("up"),
+);
+document.getElementById("south")!.addEventListener(
+  "click",
+  () => game.movePlayer("down"),
+);
+document.getElementById("west")!.addEventListener(
+  "click",
+  () => game.movePlayer("left"),
+);
+document.getElementById("east")!.addEventListener(
+  "click",
+  () => game.movePlayer("right"),
+);
+document.getElementById("reset")!.addEventListener(
+  "click",
+  () => game.resetGame(),
+);
+
+// Increment the score when player moves
+function incrementScore() {
+  score++;
+  updateDisplay();
 }
