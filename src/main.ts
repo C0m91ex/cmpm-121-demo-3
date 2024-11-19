@@ -1,294 +1,508 @@
 // @deno-types="npm:@types/leaflet@^1.9.14"
 import leaflet from "leaflet";
+
+// Style sheets
 import "leaflet/dist/leaflet.css";
 import "./style.css";
-import luck from "./luck.ts";
 import "./leafletWorkaround.ts";
 
-// Core gameplay settings with Null Island as origin
-const NULL_ISLAND = leaflet.latLng(0, 0); // Reference origin at Null Island
-const VIEW_ZOOM = 19;
-const TILE_INCREMENT = 0.0001;
-const LOCAL_RADIUS = 8;
-const SPAWN_PROB = 0.1;
+// Deterministic random number generator
+import luck from "./luck.ts";
 
-// Flyweight cache for coordinates to reduce object creation
-const cacheLocationFlyweights = new Map<string, leaflet.LatLngBounds>();
+import { Grid, Cell } from "./grid.ts";
+// Location of our classroom (as identified on Google Maps)
+const OAKES_CLASSROOM = leaflet.latLng(36.98949379578401, -122.06277128548504);
 
-// Initial player stats
-let score = 0;
-let coins = 0;
-let uniqueCoinId = 0; // Counter to uniquely identify each coin
-let playerPosition = { x: 0, y: 0 };
+// Tunable gameplay parameters
+const GAMEPLAY_ZOOM_LEVEL = 19;
+const CACHE_SPAWN_PROBABILITY = 0.1;
+const TILE_WIDTH = 0.0001;
+const TILE_VISIBILITY_RADIUS = 4;
+const MOVE_INCREMENT = 0.0001;
+const DEGREES_TO_METERS = 10000;
 
-// Memento Pattern Classes
-class Memento {
-  private state: string;
+// game state initialization
+const grid = new Grid(TILE_WIDTH, TILE_VISIBILITY_RADIUS);
 
-  constructor(state: string) {
-    this.state = state;
-  }
-
-  public getState(): string {
-    return this.state;
-  }
-}
-
-class Caretaker {
-  private mementos: Memento[] = [];
-
-  public addMemento(memento: Memento): void {
-    this.mementos.push(memento);
-  }
-
-  public getMemento(index: number): Memento {
-    return this.mementos[index];
-  }
-
-  public getMementosList(): Memento[] {
-    return this.mementos;
-  }
-}
-
-class Game {
-  private visibleCaches: Set<string>;
-  private history: Caretaker;
-
-  constructor() {
-    this.visibleCaches = new Set();
-    this.history = new Caretaker();
-    this.updateVisibleCaches();
-    this.saveState();
-  }
-
-  // Update visible caches based on the player's position
-  private updateVisibleCaches(): void {
-    this.visibleCaches.clear();
-    for (const cache of cacheLocationFlyweights.keys()) {
-      const [row, col] = cache.split(",");
-      const colNum = parseInt(col, 10);
-      if (
-        Math.abs(playerPosition.x - parseInt(row, 10)) <= 1 &&
-        Math.abs(playerPosition.y - colNum) <= 1
-      ) {
-        this.visibleCaches.add(cache);
-      }
-    }
-  }
-
-  // Save the current state of the game (player position and visible caches)
-  private saveState(): void {
-    const state =
-      `Position: (${playerPosition.x}, ${playerPosition.y}) | Caches: ${
-        Array.from(this.visibleCaches).join(", ")
-      }`;
-    const memento = new Memento(state);
-    this.history.addMemento(memento);
-  }
-
-  // Move the player in a given direction (left, right, up, down)
-  public movePlayer(direction: string): void {
-    switch (direction) {
-      case "left":
-        playerPosition.x--;
-        break;
-      case "right":
-        playerPosition.x++;
-        break;
-      case "up":
-        playerPosition.y--;
-        break;
-      case "down":
-        playerPosition.y++;
-        break;
-    }
-
-    this.updateVisibleCaches();
-    this.saveState();
-    this.updateStatusPanel();
-    incrementScore(); // Update score when player moves
-  }
-
-  // Undo the last move
-  public undoMove(): void {
-    const lastMemento = this.history.getMemento(
-      this.history.getMementosList().length - 1,
-    );
-    const state = lastMemento.getState();
-    const positionMatch = state.match(/Position: \((\d+), (\d+)\)/);
-    if (positionMatch) {
-      playerPosition.x = parseInt(positionMatch[1], 10);
-      playerPosition.y = parseInt(positionMatch[2], 10);
-    }
-    this.updateVisibleCaches();
-    this.updateStatusPanel();
-  }
-
-  // Reset the player position and visible caches
-  public resetGame(): void {
-    playerPosition = { x: 0, y: 0 };
-    this.visibleCaches.clear();
-    this.saveState();
-    this.updateStatusPanel();
-  }
-
-  // Update the status panel on the webpage
-  private updateStatusPanel(): void {
-    const statusPanel = document.getElementById("statusPanel");
-    if (statusPanel) {
-      statusPanel.innerHTML =
-        `Player Position: (${playerPosition.x}, ${playerPosition.y})<br />Visible Caches: ${
-          Array.from(this.visibleCaches).join(", ")
-        }`;
-    }
-  }
-}
-
-// Initialize the game
-const game = new Game();
-
-// Map setup with Null Island as center
-const mapElement = document.getElementById("map");
-const map = leaflet.map(mapElement!, {
-  center: NULL_ISLAND,
-  zoom: VIEW_ZOOM,
-  minZoom: VIEW_ZOOM,
-  maxZoom: VIEW_ZOOM,
+const map = leaflet.map(document.getElementById("map")!, {
+  center: OAKES_CLASSROOM,
+  zoom: GAMEPLAY_ZOOM_LEVEL,
+  minZoom: GAMEPLAY_ZOOM_LEVEL,
+  maxZoom: GAMEPLAY_ZOOM_LEVEL,
   zoomControl: false,
   scrollWheelZoom: false,
 });
 
-leaflet.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
-  maxZoom: 19,
-  attribution:
-    '&copy; <a href="http://www.openstreetmap.org/copyright">OpenStreetMap</a>',
-}).addTo(map);
+const playerInventory: Coin[] = [];
+const cacheMementos = new Map<string, string>();
 
-// Status panel
-const displayStatus = document.querySelector<HTMLDivElement>("#statusPanel")!;
-function updateDisplay() {
-  displayStatus.innerHTML = `Score: ${score} | Coins: ${coins}`;
+const movementHistory: leaflet.LatLng[] = [];
+const movementPath = leaflet
+  .polyline(movementHistory, { color: "blue" })
+  .addTo(map);
+
+// classes
+class Coin {
+  constructor(public id: string) {}
 }
-updateDisplay();
 
-// Function to generate or retrieve a flyweight location
-function getFlyweightLocation(x: number, y: number): leaflet.LatLngBounds {
-  const key = `${x},${y}`;
-  if (!cacheLocationFlyweights.has(key)) {
-    const boundary = leaflet.latLngBounds([
-      [
-        NULL_ISLAND.lat + x * TILE_INCREMENT,
-        NULL_ISLAND.lng + y * TILE_INCREMENT,
-      ],
-      [
-        NULL_ISLAND.lat + (x + 1) * TILE_INCREMENT,
-        NULL_ISLAND.lng + (y + 1) * TILE_INCREMENT,
-      ],
-    ]);
-    cacheLocationFlyweights.set(key, boundary);
+class Cache {
+  location: leaflet.LatLng;
+  coins: Coin[];
+
+  constructor(location: leaflet.LatLng, coins: Coin[]) {
+    this.location = location;
+    this.coins = coins;
   }
-  return cacheLocationFlyweights.get(key)!;
+
+  toMemento(): string {
+    return JSON.stringify(this.coins.map((coin) => coin.id));
+  }
+
+  fromMemento(memento: string) {
+    const coinIds = JSON.parse(memento);
+    this.coins = coinIds.map((id: string) => new Coin(id));
+  }
 }
 
-// Generate a unique token for each coin (simple incrementing ID for demonstration)
-function generateCoinToken(): string {
-  return `coin_${uniqueCoinId++}`;
+// map and icon initialization
+leaflet
+  .tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    maxZoom: 19,
+    attribution:
+      '&copy; <a href="http://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+  })
+  .addTo(map);
+
+function resolveAssetPath(relativePath: string): string {
+  const isGHPage = location.hostname === "akhalim1.github.io";
+
+  if (isGHPage) {
+    console.log(`/cmpm-121-demo-3/${relativePath}`);
+    return `/cmpm-121-demo-3/${relativePath}`;
+  } else {
+    return import.meta.resolve(`../public/${relativePath}`);
+  }
 }
 
-// Create cache with unique coins as non-fungible tokens
-function createCache(x: number, y: number) {
-  const boundary = getFlyweightLocation(x, y);
-  const cacheCoins = Array.from({
-    length: Math.floor(luck([x, y, "coins"].toString()) * 10) + 1,
-  }, generateCoinToken);
+const playerIcon = leaflet.icon({
+  iconUrl: resolveAssetPath("Player.png"),
+  iconSize: [32, 32],
+});
 
-  const cacheRectangle = leaflet.rectangle(boundary);
-  cacheRectangle.addTo(map);
+const cacheIcon = leaflet.icon({
+  iconUrl: resolveAssetPath("Money.png"),
+  iconSize: [32, 32],
+});
 
-  // Configure popup for cache interaction
-  cacheRectangle.bindPopup(() => {
-    const popupContent = document.createElement("div");
-    popupContent.innerHTML = ` 
-      <div>Cache at (${x},${y}) contains coins:</div>
-      <ul id="coinList">${cacheCoins.map((id) => `<li>${id}</li>`).join("")}
-      </ul>
-      <button id="collectBtn">Collect</button>
-      <button id="depositBtn">Deposit</button>
-    `;
+// player and cache markers
+const activeCacheMarkers = new Map<string, leaflet.Marker>();
 
-    // Collect coins from cache
-    popupContent.querySelector<HTMLButtonElement>("#collectBtn")!
-      .addEventListener("click", () => {
-        if (cacheCoins.length > 0) {
-          coins++;
-          const collectedCoin = cacheCoins.pop();
-          updateDisplay();
-          document.getElementById("coinList")!.innerHTML = cacheCoins.map(
-            (id) => `<li>${id}</li>`,
-          ).join("");
-          console.log(`Collected coin with ID: ${collectedCoin}`);
+const playerMarker = leaflet.marker(OAKES_CLASSROOM, { icon: playerIcon });
+playerMarker.bindTooltip("That's you!");
+playerMarker.addTo(map);
+
+const statusPanel = document.querySelector<HTMLDivElement>("#statusPanel")!; // element `statusPanel` is defined in index.html
+statusPanel.innerHTML = "inventory:";
+
+// game state functions
+function recordPlayerMovement(newPosition: leaflet.LatLng) {
+  movementHistory.push(newPosition);
+  movementPath.setLatLngs(movementHistory);
+}
+
+function savePlayerInventory() {
+  const inventoryIds = playerInventory.map((coin) => coin.id);
+  localStorage.setItem("inventory", JSON.stringify(inventoryIds));
+}
+
+function savePlayerPosition() {
+  const playerPosition = playerMarker.getLatLng();
+  localStorage.setItem(
+    "playerPosition",
+    JSON.stringify({ lat: playerPosition.lat, lng: playerPosition.lng }),
+  );
+}
+
+function saveCacheMementos() {
+  const cacheMementosObject: { [key: string]: string } = {};
+  cacheMementos.forEach((value, key) => {
+    cacheMementosObject[key] = value;
+  });
+  localStorage.setItem("cacheMementos", JSON.stringify(cacheMementosObject));
+}
+
+function saveMovementHistory() {
+  const movementHistoryArray = movementHistory.map((pos) => ({
+    lat: pos.lat,
+    lng: pos.lng,
+  }));
+  localStorage.setItem("movementHistory", JSON.stringify(movementHistoryArray));
+}
+
+function loadPlayerPosition() {
+  const savedPos = localStorage.getItem("playerPosition");
+
+  if (savedPos) {
+    const { lat, lng } = JSON.parse(savedPos);
+    playerMarker.setLatLng(new leaflet.LatLng(lat, lng));
+  }
+}
+
+function loadPlayerInventory() {
+  const savedInventory = localStorage.getItem("inventory");
+
+  if (savedInventory) {
+    playerInventory.length = 0;
+    JSON.parse(savedInventory).forEach((id: string) =>
+      playerInventory.push(new Coin(id))
+    );
+    updateInventoryDisplay();
+  }
+}
+
+function loadCacheMementos(playerPosition: leaflet.LatLng) {
+  activeCacheMarkers.forEach((marker) => marker.remove());
+  activeCacheMarkers.clear();
+
+  const savedCacheMementos = localStorage.getItem("cacheMementos");
+  const maxDistance = TILE_VISIBILITY_RADIUS * TILE_WIDTH * DEGREES_TO_METERS;
+
+  if (savedCacheMementos) {
+    const cacheEntries = JSON.parse(savedCacheMementos);
+    cacheMementos.clear();
+
+    for (const key in cacheEntries) {
+      if (Object.prototype.hasOwnProperty.call(cacheEntries, key)) {
+        const memento = cacheEntries[key];
+        if (typeof memento === "string") {
+          cacheMementos.set(key, memento);
+        } else {
+          console.warn(`Invalid ${key}:`, memento);
         }
-      });
+      }
+    }
 
-    // Deposit a coin into the cache
-    popupContent.querySelector<HTMLButtonElement>("#depositBtn")!
-      .addEventListener("click", () => {
-        if (coins > 0) {
-          coins--;
-          const newCoinToken = generateCoinToken();
-          cacheCoins.push(newCoinToken);
-          updateDisplay();
-          document.getElementById("coinList")!.innerHTML = cacheCoins.map(
-            (id) => `<li>${id}</li>`,
-          ).join("");
-          console.log(`Deposited coin with ID: ${newCoinToken}`);
-        }
-      });
+    cacheMementos.forEach((memento, key) => {
+      const [i, j] = key.split(",").map(Number);
+      const cell = { i, j };
+      const cellCenter = grid.getCellBound(cell).getCenter();
+      const distance = playerPosition.distanceTo(cellCenter);
 
-    return popupContent;
+      if (distance <= maxDistance) {
+        const cache = new Cache(cellCenter, []);
+        cache.fromMemento(memento);
+        spawnCache(cellCenter);
+      }
+    });
+  }
+}
+
+function loadMovementHistory() {
+  const savedMovementHistory = localStorage.getItem("movementHistory");
+
+  if (savedMovementHistory) {
+    const loadedMovement = JSON.parse(savedMovementHistory);
+    movementHistory.length = 0;
+
+    loadedMovement.forEach((pos: { lat: number; lng: number }) => {
+      movementHistory.push(new leaflet.LatLng(pos.lat, pos.lng));
+    });
+    movementPath.setLatLngs(movementHistory);
+  }
+}
+
+function saveGameState() {
+  savePlayerInventory();
+  savePlayerPosition();
+  saveCacheMementos();
+  saveMovementHistory();
+}
+
+function loadGameState() {
+  const playerPosition: leaflet.LatLng = playerMarker.getLatLng();
+  loadPlayerInventory();
+  loadPlayerPosition();
+  loadCacheMementos(playerPosition);
+  loadMovementHistory();
+}
+
+// player movement
+function movePlayer(direction: string) {
+  const currentPos = playerMarker.getLatLng();
+
+  let newLatLng;
+
+  switch (direction) {
+    case "up":
+      newLatLng = new leaflet.LatLng(
+        currentPos.lat + MOVE_INCREMENT,
+        currentPos.lng,
+      );
+      break;
+    case "down":
+      newLatLng = new leaflet.LatLng(
+        currentPos.lat - MOVE_INCREMENT,
+        currentPos.lng,
+      );
+      break;
+    case "left":
+      newLatLng = new leaflet.LatLng(
+        currentPos.lat,
+        currentPos.lng - MOVE_INCREMENT,
+      );
+      break;
+    case "right":
+      newLatLng = new leaflet.LatLng(
+        currentPos.lat,
+        currentPos.lng + MOVE_INCREMENT,
+      );
+      break;
+  }
+
+  if (newLatLng) {
+    recordPlayerMovement(newLatLng);
+    playerMarker.setLatLng(newLatLng);
+    updateNearbyCaches();
+  }
+}
+
+// cache management functions
+function updateNearbyCaches() {
+  const playerPosition = playerMarker.getLatLng();
+  const nearbyCells = grid.getCellsNearPoint(playerPosition);
+
+  activeCacheMarkers.forEach((marker, key) => {
+    const [i, j] = key.split(",").map(Number);
+    const cellCenter = grid.getCellBound({ i, j }).getCenter();
+
+    if (
+      playerPosition.distanceTo(cellCenter) >
+        TILE_VISIBILITY_RADIUS * TILE_WIDTH * DEGREES_TO_METERS
+    ) {
+      marker.remove();
+      activeCacheMarkers.delete(key);
+    }
+  });
+
+  nearbyCells.forEach((cell) => {
+    const cellKey = `${cell.i},${cell.j}`;
+    const cellCenter = grid.getCellBound(cell).getCenter();
+
+    if (
+      !activeCacheMarkers.has(cellKey) &&
+      luck([cell.i, cell.j].toString()) < CACHE_SPAWN_PROBABILITY
+    ) {
+      const marker = spawnCache(cellCenter);
+      activeCacheMarkers.set(cellKey, marker);
+    }
   });
 }
 
-// Place caches using flyweight pattern for grid coordinates
-for (let x = -LOCAL_RADIUS; x < LOCAL_RADIUS; x++) {
-  for (let y = -LOCAL_RADIUS; y < LOCAL_RADIUS; y++) {
-    if (luck([x, y].toString()) < SPAWN_PROB) {
-      createCache(x, y);
-    }
+function saveCacheState(cellKey: string, cache: Cache) {
+  const memento = cache.toMemento();
+  cacheMementos.set(cellKey, memento);
+}
+
+function restoreCacheState(cellKey: string, cache: Cache) {
+  if (cacheMementos.has(cellKey)) {
+    cache.fromMemento(cacheMementos.get(cellKey)!);
   }
 }
 
-// Attach the movePlayer function to the global scope
-Object.assign(window, {
-  movePlayer: game.movePlayer.bind(game),
-  undoMove: game.undoMove.bind(game),
-  resetGame: game.resetGame.bind(game),
+function spawnCache(point: leaflet.LatLng): leaflet.Marker {
+  const cell: Cell = grid.getCellForPoint(point);
+  const cellKey = `${cell.i},${cell.j}`;
+
+  let cache: Cache;
+  if (cacheMementos.has(cellKey)) {
+    cache = new Cache(point, []);
+    restoreCacheState(cellKey, cache);
+  } else {
+    cache = new Cache(point, []);
+    const numberOfCoins = Math.floor(luck([cell.i, cell.j].toString()) * 100);
+    for (let k = 0; k < numberOfCoins; k++) {
+      const coinId = `${cell.i}:${cell.j}#${k}`;
+      cache.coins.push(new Coin(coinId));
+    }
+    saveCacheState(cellKey, cache);
+  }
+
+  const marker = leaflet.marker(point, { icon: cacheIcon });
+  marker.bindPopup(() => createCachePopupContent(cache));
+  marker.addTo(map);
+
+  activeCacheMarkers.set(cellKey, marker);
+
+  return marker;
+}
+
+// deposit/collect coins
+function createCoinElement(
+  coin: Coin,
+  cache: Cache,
+  popupDiv: HTMLElement,
+): HTMLElement {
+  const fixedCoinId = coin.id.replace(/[^a-zA-Z0-9-_]/g, "_");
+  const coinDiv = document.createElement("div");
+  coinDiv.innerHTML = `
+      <span>Coin ID: ${coin.id}</span>
+      <button id="collect-${fixedCoinId}">Collect</button>
+    `;
+
+  coinDiv
+    .querySelector<HTMLButtonElement>(`#collect-${fixedCoinId}`)!
+    .addEventListener("click", () => {
+      collectCoin(coin, cache, popupDiv);
+    });
+  return coinDiv;
+}
+
+function collectCoin(coin: Coin, cache: Cache, popupDiv: HTMLElement) {
+  console.log(`Collecting coin ${coin.id}`);
+  cache.coins = cache.coins.filter((c) => c.id !== coin.id);
+  playerInventory.push(coin);
+
+  updateInventoryDisplay();
+
+  const cellKey = `${grid.getCellForPoint(cache.location).i},${
+    grid.getCellForPoint(cache.location).j
+  }`;
+  saveCacheState(cellKey, cache);
+
+  const newPopupContent = createCachePopupContent(cache);
+  popupDiv.innerHTML = newPopupContent.innerHTML;
+}
+
+function createDepositElement(
+  cache: Cache,
+  popupDiv: HTMLElement,
+): HTMLElement {
+  const depositDiv = document.createElement("div");
+  depositDiv.innerHTML = `
+  <div>Deposit a coin from your inventory </div>
+  <button id = "deposit"> Deposit </button>
+  `;
+
+  depositDiv
+    .querySelector<HTMLButtonElement>("#deposit")!
+    .addEventListener("click", () => {
+      depositCoin(cache, popupDiv);
+    });
+
+  return depositDiv;
+}
+
+function depositCoin(cache: Cache, popupDiv: HTMLElement) {
+  if (playerInventory.length > 0) {
+    const coinToDeposit = playerInventory.shift()!;
+    cache.coins.push(coinToDeposit);
+
+    updateInventoryDisplay();
+
+    const cellKey = `${grid.getCellForPoint(cache.location).i},${
+      grid.getCellForPoint(cache.location).j
+    }`;
+    saveCacheState(cellKey, cache);
+
+    const newPopupContent = createCachePopupContent(cache);
+    popupDiv.innerHTML = newPopupContent.innerHTML;
+  } else {
+    console.log("No coins in inventory to deposit");
+  }
+}
+
+function createCachePopupContent(cache: Cache) {
+  const popupDiv = document.createElement("div");
+  popupDiv.innerHTML = `
+    <div>There is a cache here at 
+      ${cache.location.lat.toFixed(5)}, 
+      ${cache.location.lng.toFixed(5)}
+    </div>
+  `;
+
+  cache.coins.forEach((coin) => {
+    const coinDiv = createCoinElement(coin, cache, popupDiv);
+    popupDiv.appendChild(coinDiv);
+  });
+
+  const depositDiv = createDepositElement(cache, popupDiv);
+  popupDiv.appendChild(depositDiv);
+  return popupDiv;
+}
+
+function updateInventoryDisplay() {
+  const statusPanel = document.querySelector<HTMLDivElement>("#statusPanel")!;
+  statusPanel.innerHTML = `inventory: 
+  ${playerInventory.map((coin) => coin.id).join(", ")}`;
+}
+
+const nearbyCell = grid.getCellsNearPoint(OAKES_CLASSROOM);
+
+nearbyCell.forEach((cell) => {
+  const cellCenter = grid.getCellBound(cell).getCenter();
+  if (luck([cell.i, cell.j].toString()) < CACHE_SPAWN_PROBABILITY) {
+    spawnCache(cellCenter);
+  }
 });
 
-// Button event listeners for directional movement
-document.getElementById("north")!.addEventListener(
-  "click",
-  () => game.movePlayer("up"),
-);
-document.getElementById("south")!.addEventListener(
-  "click",
-  () => game.movePlayer("down"),
-);
-document.getElementById("west")!.addEventListener(
-  "click",
-  () => game.movePlayer("left"),
-);
-document.getElementById("east")!.addEventListener(
-  "click",
-  () => game.movePlayer("right"),
-);
-document.getElementById("reset")!.addEventListener(
-  "click",
-  () => game.resetGame(),
-);
+// event listeners
+document
+  .getElementById("north")!
+  .addEventListener("click", () => movePlayer("up"));
 
-// Increment the score when player moves
-function incrementScore() {
-  score++;
-  updateDisplay();
-}
+document
+  .getElementById("south")!
+  .addEventListener("click", () => movePlayer("down"));
+
+document
+  .getElementById("west")!
+  .addEventListener("click", () => movePlayer("left"));
+
+document
+  .getElementById("east")!
+  .addEventListener("click", () => movePlayer("right"));
+
+let geolocationActive = false;
+let geolocactionWatcherId: number | null = null;
+
+document.getElementById("sensor")!.addEventListener("click", () => {
+  if (navigator.geolocation) {
+    if (!geolocationActive) {
+      geolocationActive = true;
+      geolocactionWatcherId = navigator.geolocation.watchPosition(
+        (position) => {
+          const newLatLng = new leaflet.LatLng(
+            position.coords.latitude,
+            position.coords.longitude,
+          );
+          playerMarker.setLatLng(newLatLng);
+          updateNearbyCaches();
+          recordPlayerMovement(newLatLng);
+        },
+      );
+    } else {
+      geolocationActive = false;
+      if (geolocactionWatcherId != null) {
+        navigator.geolocation.clearWatch(geolocactionWatcherId);
+        geolocactionWatcherId = null;
+      }
+    }
+  }
+});
+
+document.getElementById("reset")!.addEventListener("click", () => {
+  localStorage.clear();
+
+  playerInventory.length = 0;
+  updateInventoryDisplay();
+
+  cacheMementos.clear();
+  movementHistory.length = 0;
+  movementPath.setLatLngs([]);
+  playerMarker.setLatLng(OAKES_CLASSROOM);
+});
+
+// final setup
+globalThis.addEventListener("beforeunload", saveGameState);
+loadGameState();
