@@ -102,7 +102,7 @@ const playerMarker = leaflet.marker(OAKES_CLASSROOM, { icon: playerIcon });
 playerMarker.bindTooltip("That's you!");
 playerMarker.addTo(map);
 
-const statusPanel = document.querySelector<HTMLDivElement>("#statusPanel")!; // element `statusPanel` is defined in index.html
+const statusPanel = document.querySelector<HTMLDivElement>("#statusPanel")!;
 statusPanel.innerHTML = "inventory:";
 
 // game state functions
@@ -272,69 +272,74 @@ function updateNearbyCaches() {
   const playerPosition = playerMarker.getLatLng();
   const nearbyCells = grid.getCellsNearPoint(playerPosition);
 
+  // Remove caches that are no longer within the visibility radius
   activeCacheMarkers.forEach((marker, key) => {
     const [i, j] = key.split(",").map(Number);
     const cellCenter = grid.getCellBound({ i, j }).getCenter();
 
-    if (
-      playerPosition.distanceTo(cellCenter) >
-        TILE_VISIBILITY_RADIUS * TILE_WIDTH * DEGREES_TO_METERS
-    ) {
+    if (playerPosition.distanceTo(cellCenter) > TILE_VISIBILITY_RADIUS * TILE_WIDTH * DEGREES_TO_METERS) {
       marker.remove();
       activeCacheMarkers.delete(key);
     }
   });
 
+  // Add new caches if needed
   nearbyCells.forEach((cell) => {
     const cellKey = `${cell.i},${cell.j}`;
     const cellCenter = grid.getCellBound(cell).getCenter();
 
-    if (
-      !activeCacheMarkers.has(cellKey) &&
-      luck([cell.i, cell.j].toString()) < CACHE_SPAWN_PROBABILITY
-    ) {
+    if (!activeCacheMarkers.has(cellKey) && luck([cell.i, cell.j].toString()) < CACHE_SPAWN_PROBABILITY) {
       const marker = spawnCache(cellCenter);
       activeCacheMarkers.set(cellKey, marker);
     }
   });
 }
 
-function saveCacheState(cellKey: string, cache: Cache) {
-  const memento = cache.toMemento();
-  cacheMementos.set(cellKey, memento);
-}
-
-function restoreCacheState(cellKey: string, cache: Cache) {
-  if (cacheMementos.has(cellKey)) {
-    cache.fromMemento(cacheMementos.get(cellKey)!);
+function manageCacheState(cellKey: string, cache: Cache, isSave: boolean) {
+  if (isSave) {
+    const memento = cache.toMemento();
+    cacheMementos.set(cellKey, memento);
+  } else {
+    if (cacheMementos.has(cellKey)) {
+      cache.fromMemento(cacheMementos.get(cellKey)!);
+    }
   }
 }
 
-function spawnCache(point: leaflet.LatLng): leaflet.Marker {
-  const cell: Cell = grid.getCellForPoint(point);
+function spawnCache(cellCenter: leaflet.LatLng): leaflet.Marker {
+
+  const cache = getOrCreateCache(cellCenter);
+
+  return addCacheMarker(cache); 
+}
+
+function getOrCreateCache(cellCenter: leaflet.LatLng): Cache {
+  const cell = grid.getCellForPoint(cellCenter);
   const cellKey = `${cell.i},${cell.j}`;
 
-  let cache: Cache;
+  // Restore existing cache state if possible
   if (cacheMementos.has(cellKey)) {
-    cache = new Cache(point, []);
-    restoreCacheState(cellKey, cache);
-  } else {
-    cache = new Cache(point, []);
-    const numberOfCoins = Math.floor(luck([cell.i, cell.j].toString()) * 100);
-    for (let k = 0; k < numberOfCoins; k++) {
-      const coinId = `${cell.i}:${cell.j}#${k}`;
-      cache.coins.push(new Coin(coinId));
-    }
-    saveCacheState(cellKey, cache);
+    const cache = new Cache(cellCenter, []);
+    manageCacheState(cellKey, cache, false);
+    return cache;
   }
 
-  const marker = leaflet.marker(point, { icon: cacheIcon });
-  marker.bindPopup(() => createCachePopupContent(cache));
+  // Otherwise, create a new cache with random coins
+  const newCache = new Cache(cellCenter, generateCoins(cell));
+  manageCacheState(cellKey, newCache, true);
+  return newCache;
+}
+
+function addCacheMarker(cache: Cache): leaflet.Marker {
+  const marker = leaflet.marker(cache.location, { icon: cacheIcon });
+  marker.bindPopup(() => createCachePopupContent(cache)); // Call your existing helper
   marker.addTo(map);
+  return marker; 
+}
 
-  activeCacheMarkers.set(cellKey, marker);
-
-  return marker;
+function generateCoins(cell: Cell): Coin[] {
+  const coinCount = Math.floor(luck([cell.i, cell.j].toString()) * 100);
+  return Array.from({ length: coinCount }, (_, k) => new Coin(`${cell.i}:${cell.j}#${k}`));
 }
 
 // deposit/collect coins
@@ -368,7 +373,7 @@ function collectCoin(coin: Coin, cache: Cache, popupDiv: HTMLElement) {
   const cellKey = `${grid.getCellForPoint(cache.location).i},${
     grid.getCellForPoint(cache.location).j
   }`;
-  saveCacheState(cellKey, cache);
+  manageCacheState(cellKey, cache, true);
 
   const newPopupContent = createCachePopupContent(cache);
   popupDiv.innerHTML = newPopupContent.innerHTML;
@@ -376,7 +381,7 @@ function collectCoin(coin: Coin, cache: Cache, popupDiv: HTMLElement) {
 
 function createDepositElement(
   cache: Cache,
-  popupDiv: HTMLElement,
+  popupDiv: HTMLElement | null, 
 ): HTMLElement {
   const depositDiv = document.createElement("div");
   depositDiv.innerHTML = `
@@ -384,11 +389,12 @@ function createDepositElement(
   <button id = "deposit"> Deposit </button>
   `;
 
-  depositDiv
-    .querySelector<HTMLButtonElement>("#deposit")!
-    .addEventListener("click", () => {
-      depositCoin(cache, popupDiv);
-    });
+  const depositButton = depositDiv.querySelector<HTMLButtonElement>("#deposit")!;
+  depositButton.addEventListener("click", () => {
+    if (popupDiv) {
+      depositCoin(cache, popupDiv); 
+    }
+  });
 
   return depositDiv;
 }
@@ -403,7 +409,7 @@ function depositCoin(cache: Cache, popupDiv: HTMLElement) {
     const cellKey = `${grid.getCellForPoint(cache.location).i},${
       grid.getCellForPoint(cache.location).j
     }`;
-    saveCacheState(cellKey, cache);
+    manageCacheState(cellKey, cache, true);
 
     const newPopupContent = createCachePopupContent(cache);
     popupDiv.innerHTML = newPopupContent.innerHTML;
@@ -412,22 +418,41 @@ function depositCoin(cache: Cache, popupDiv: HTMLElement) {
   }
 }
 
-function createCachePopupContent(cache: Cache) {
+function renderCoinInfo(cache: Cache): HTMLElement {
+  const coinInfoDiv = document.createElement("div");
+  cache.coins.forEach((coin) => {
+    const coinDiv = createCoinElement(coin, cache, coinInfoDiv);
+    coinInfoDiv.appendChild(coinDiv);
+  });
+  return coinInfoDiv;
+}
+
+function renderDepositOptions(cache: Cache): HTMLElement {
+  const depositDiv = createDepositElement(cache, null); 
+  return depositDiv;
+}
+
+function createCachePopupContent(cache: Cache): HTMLElement {
   const popupDiv = document.createElement("div");
-  popupDiv.innerHTML = `
+
+  // Popup header with location information
+  const headerDiv = document.createElement("div");
+  headerDiv.innerHTML = `
     <div>There is a cache here at 
       ${cache.location.lat.toFixed(5)}, 
       ${cache.location.lng.toFixed(5)}
     </div>
   `;
+  popupDiv.appendChild(headerDiv);
 
-  cache.coins.forEach((coin) => {
-    const coinDiv = createCoinElement(coin, cache, popupDiv);
-    popupDiv.appendChild(coinDiv);
-  });
+  // Coin information section
+  const coinInfoDiv = renderCoinInfo(cache);
+  popupDiv.appendChild(coinInfoDiv);
 
-  const depositDiv = createDepositElement(cache, popupDiv);
+  // Deposit options section
+  const depositDiv = renderDepositOptions(cache);
   popupDiv.appendChild(depositDiv);
+
   return popupDiv;
 }
 
